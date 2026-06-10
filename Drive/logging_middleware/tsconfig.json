@@ -7,6 +7,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "noEmit": false,
+    "lib": ["ES2020", "DOM"],
+    "skipLibCheck": true,
     "typeRoots": ["../node_modules/@types"]
   },
   "include": ["src/**/*.ts"],
