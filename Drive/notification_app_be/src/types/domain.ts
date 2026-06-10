@@ -1,6 +1,8 @@
+export type NotificationType = 'event' | 'result' | 'placement';
+
 export interface Notification {
   id: string;
-  title: string;
+  type: NotificationType;
   message: string;
-  createdAt: string;
+  timestamp: string;
 }
