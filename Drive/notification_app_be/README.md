@@ -53,6 +53,12 @@ See `.env.example` for template:
 - `PORT`: Server port (default: 3001)
 - `NODE_ENV`: Environment (development/production)
 - `LOG_LEVEL`: Logging verbosity
+- `PGHOST`: PostgreSQL host
+- `PGPORT`: PostgreSQL port
+- `PGUSER`: PostgreSQL user
+- `PGPASSWORD`: PostgreSQL password
+- `PGDATABASE`: PostgreSQL database name
+- `PGPOOLSIZE`: Connection pool size for the Postgres client
 
 ## API Endpoints (To Be Implemented)
 
