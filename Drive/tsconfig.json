@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "module": "ESNext",
+    "module": "commonjs",
     "lib": ["ES2020"],
     "moduleResolution": "node",
     "strict": true,
@@ -12,8 +12,7 @@
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
-    "typeRoots": ["./node_modules/@types"]
+    "sourceMap": true
   },
   "typeAcquisition": {
     "enable": false
