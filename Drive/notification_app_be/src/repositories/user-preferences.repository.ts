@@ -108,6 +108,14 @@ export class UserPreferencesRepositoryImpl implements UserPreferencesRepository 
     return this.toUserPreferences(result.rows[0]);
   }
 
+  async listAllUserIds(): Promise<string[]> {
+    const result = await pool.query<{ user_id: string }>(
+      "SELECT user_id FROM user_preferences ORDER BY user_id"
+    );
+
+    return result.rows.map((row) => row.user_id);
+  }
+
   async remove(userId: string): Promise<void> {
     await pool.query("DELETE FROM user_preferences WHERE user_id = $1", [userId]);
   }

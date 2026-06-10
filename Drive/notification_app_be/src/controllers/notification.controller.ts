@@ -1,5 +1,6 @@
 import { Request, Response, Router } from "express";
 import {
+  NotificationCreateInput,
   NotificationListQuery,
   NotificationService,
 } from "../services/interfaces/notification-service.interface";
@@ -15,11 +16,96 @@ export class NotificationController implements Controller {
   constructor(private readonly service: NotificationService) {}
 
   registerRoutes(): void {
+    this.router.post("/notifications", this.handleCreateNotification.bind(this));
     this.router.get("/notifications", this.handleListNotifications.bind(this));
   }
 
   getRouter(): Router {
     return this.router;
+  }
+
+  private async handleCreateNotification(req: Request, res: Response): Promise<void> {
+    const requestMeta = {
+      method: req.method,
+      path: req.path,
+      body: req.body,
+    };
+
+    logger.info("POST /notifications request started", requestMeta);
+
+    const validationError = this.validateCreatePayload(req.body);
+    if (validationError) {
+      logger.warn("POST /notifications request validation failed", {
+        ...requestMeta,
+        validationError,
+      });
+
+      res.status(400).json({
+        success: false,
+        error: validationError,
+      });
+      return;
+    }
+
+    const input = req.body as NotificationCreateInput;
+
+    try {
+      const notification = await this.service.createNotification(input);
+
+      logger.info("POST /notifications request succeeded", {
+        ...requestMeta,
+        notificationId: notification.id,
+      });
+
+      res.status(201).json({
+        success: true,
+        data: notification,
+      });
+    } catch (error) {
+      logger.error("POST /notifications request failed", {
+        ...requestMeta,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      res.status(500).json({
+        success: false,
+        error: "Unable to create notification.",
+      });
+    }
+  }
+
+  private validateCreatePayload(payload: Record<string, unknown>): string | null {
+    const { type, title, body, priority, metadata, targetAudience, createdBy } = payload as Record<string, unknown>;
+
+    if (typeof type !== "string" || !VALID_NOTIFICATION_TYPES.includes(type as NotificationType)) {
+      return `Field 'type' is required and must be one of: ${VALID_NOTIFICATION_TYPES.join(", ")}.`;
+    }
+
+    if (typeof title !== "string" || title.length === 0) {
+      return "Field 'title' is required.";
+    }
+
+    if (typeof body !== "string" || body.length === 0) {
+      return "Field 'body' is required.";
+    }
+
+    if (typeof priority !== "string" || !["low", "medium", "high", "critical"].includes(priority)) {
+      return "Field 'priority' is required and must be one of: low, medium, high, critical.";
+    }
+
+    if (typeof metadata !== "object" || metadata === null) {
+      return "Field 'metadata' is required and must be an object.";
+    }
+
+    if (typeof targetAudience !== "object" || targetAudience === null) {
+      return "Field 'targetAudience' is required and must be an object.";
+    }
+
+    if (typeof createdBy !== "string" || createdBy.length === 0) {
+      return "Field 'createdBy' is required.";
+    }
+
+    return null;
   }
 
   private handleListNotifications(req: Request, res: Response): void {

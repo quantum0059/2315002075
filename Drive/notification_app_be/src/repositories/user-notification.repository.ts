@@ -131,6 +131,17 @@ export class UserNotificationRepositoryImpl implements UserNotificationRepositor
     return result.rowCount || 0;
   }
 
+  async markAsDelivered(userId: string, notificationId: string, deliveryChannel?: string): Promise<void> {
+    await pool.query(
+      `UPDATE user_notifications SET
+         delivered = TRUE,
+         delivered_at = NOW(),
+         delivery_channel = COALESCE($3, delivery_channel)
+       WHERE user_id = $1 AND notification_id = $2`,
+      [userId, notificationId, deliveryChannel || null]
+    );
+  }
+
   async remove(id: string): Promise<void> {
     await pool.query("DELETE FROM user_notifications WHERE id = $1", [id]);
   }

@@ -1024,6 +1024,235 @@ interface UserPreferences {
 - CI/CD pipeline setup
 - Cloud deployment options
 
+## Stage 5: High-Volume Delivery Design
+
+### 5.1 Shortcomings of the current implementation
+The current pattern:
+
+```python
+for student in students:
+  send_email(student)
+  save_to_db(student)
+  push_notification(student)
+```
+
+Key problems:
+- **Synchronous, linear processing**: one student at a time means 50,000 sequential operations.
+- **Tight coupling**: email, database, and push are all in the same code path.
+- **No buffering or backpressure**: downstream systems can be overwhelmed.
+- **Single-point failure**: one failed send can abort the whole batch.
+- **Inconsistent state**: partial success leaves some students updated and others not.
+- **No retry orchestration**: failures are not retried in a controlled, idempotent way.
+- **Poor observability**: it is hard to know which part failed for which student.
+
+### 5.2 Failure scenarios for Notify All
+1. **Email vendor transient outage**
+   - Email sends fail for thousands of students while DB writes succeed.
+   - Result: records show notification created, but delivery is incomplete.
+2. **Database write failure after email send**
+   - Email sent successfully, then DB insert fails due deadlock or timeout.
+   - Result: user never sees in-app notification and delivery tracking is missing.
+3. **Push service backpressure**
+   - WebSocket cluster or push gateway rejects or drops requests under load.
+   - Result: notifications are lost or delayed without retry.
+4. **Worker crash mid-batch**
+   - Process terminates after processing N students.
+   - Result: partial delivery and cascading duplicates if restarted without idempotency.
+5. **Duplicate sends**
+   - Retry logic without dedupe resends email/push multiple times.
+   - Result: poor user experience and extra cost.
+6. **Resource exhaustion**
+   - 50,000 concurrent downstream calls exhaust file descriptors, DB connections, or API quotas.
+   - Result: overall system degradation and failed notifications.
+
+### 5.3 Redesigned architecture
+Move from a sequential request model to an event-driven pipeline with queues and worker services.
+
+Core components:
+- **Notification API / command service**: accepts the HR "Notify All" request.
+- **Notification dispatcher**: resolves audience, persists the notification entity, and emits channel-specific jobs.
+- **Durable queue broker**: RabbitMQ / Amazon SQS / Redis Streams / Kafka for buffering.
+- **Email worker service**: consumes email jobs and sends mail asynchronously.
+- **In-app worker service**: writes user notification records and publishes real-time events.
+- **Delivery tracking service**: updates status and retries failed jobs.
+- **Dead-letter queue (DLQ)**: holds jobs that exceed retry policy for manual review.
+
+This design decouples the request from delivery and enables horizontal scaling.
+
+### 5.4 Queues for reliability and scalability
+Use queues to:
+- **Buffer traffic** and smooth bursts from 50,000 recipients.
+- **Decouple producers from consumers** so the API returns quickly.
+- **Provide backpressure** when delivery services are slow.
+- **Enable retries** without blocking the request path.
+- **Persist work** so jobs survive restarts and outages.
+
+Recommended queue structure:
+- `notification.email.queue`
+- `notification.inapp.queue`
+- `notification.dlq`
+
+Each job contains a unique delivery key and enough metadata to process the student’s notification independently.
+
+### 5.5 Worker services
+Worker roles:
+- **EmailWorker**
+  - Dequeues email jobs.
+  - Sends mail via SMTP or vendor API.
+  - Marks delivery status and records attempts.
+- **InAppWorker**
+  - Dequeues in-app jobs.
+  - Writes `user_notification` rows.
+  - Publishes real-time events to WebSocket/Push subsystems.
+- **RetryCoordinator**
+  - Applies exponential backoff.
+  - Moves jobs to DLQ when retry limit is reached.
+- **Stats/Audit Worker**
+  - Aggregates delivery metrics.
+  - Tracks failures, delays, and throughput.
+
+Workers can scale horizontally by partitioning jobs by user ID hash or notification ID, preserving ordering where required.
+
+### 5.6 Retry mechanisms
+Retry strategy:
+- **Transient failures**: retry with exponential backoff.
+- **Retry policy**: e.g. 3 attempts with delays of 1m, 2m, 5m.
+- **Dead-letter queue**: after N failed attempts, send the job to DLQ for manual investigation.
+- **Retry metadata**: store `attemptCount`, `lastError`, `nextRetryAt`, and `jobId`.
+- **Failure handling**:
+  - Network / timeout errors → retry.
+  - Permanent errors (invalid email, blocked account) → fail fast and do not retry.
+
+Example behavior:
+- Email provider returns 503 → worker increments attempt count and requeues the job.
+- WebSocket connection is closed → worker persists the in-app job and retries later.
+- DB deadlock on insert → retry after short delay.
+
+### 5.7 Idempotency
+Idempotency is essential for at-least-once queue delivery.
+
+Idempotency practices:
+- Generate a stable `deliveryJobId` per student-channel pair, e.g. `notificationId:userId:email`.
+- Persist a `notification_attempts` record keyed by `deliveryJobId`.
+- Use database unique constraints for `user_notification` and delivery records.
+- On worker start, check if the job was already completed:
+  - if completed, acknowledge and discard duplicate.
+  - if in progress, resume safely or skip.
+- For email providers, use provider idempotency keys when available to avoid duplicate sends.
+- For in-app writes, use `INSERT ... ON CONFLICT DO NOTHING` or `UPSERT`.
+
+This ensures retries do not cause duplicate emails or duplicate user notification rows.
+
+### 5.8 Improved pseudocode
+```typescript
+// API / command service
+async function notifyAll(notificationRequest) {
+  const notification = await persistNotification(notificationRequest)
+  const students = await resolveAudience(notification.targetAudience)
+
+  for (const student of students) {
+    const emailJob = {
+      jobId: `${notification.id}:${student.id}:email`,
+      notificationId: notification.id,
+      userId: student.id,
+      channel: 'email',
+      payload: buildEmailPayload(notification, student),
+    }
+    const inAppJob = {
+      jobId: `${notification.id}:${student.id}:inapp`,
+      notificationId: notification.id,
+      userId: student.id,
+      channel: 'inapp',
+      payload: buildInAppPayload(notification, student),
+    }
+
+    await enqueue('notification.email.queue', emailJob)
+    await enqueue('notification.inapp.queue', inAppJob)
+  }
+
+  return { notificationId: notification.id, status: 'queued' }
+}
+
+// Email worker
+async function processEmailJob(job) {
+  if (await isAlreadyDelivered(job.jobId)) {
+    return ack(job)
+  }
+
+  try {
+    await sendEmail(job.payload, { idempotencyKey: job.jobId })
+    await markDelivered(job.jobId, 'email')
+    return ack(job)
+  } catch (error) {
+    if (isTransient(error) && job.attemptCount < MAX_RETRIES) {
+      await scheduleRetry(job)
+    } else {
+      await sendToDeadLetterQueue(job, error)
+    }
+    return nack(job)
+  }
+}
+
+// In-app worker
+async function processInAppJob(job) {
+  if (await isAlreadyDelivered(job.jobId)) {
+    return ack(job)
+  }
+
+  try {
+    await upsertUserNotification(job.userId, job.notificationId, job.payload)
+    await publishRealtimeEvent(job.userId, job.payload)
+    await markDelivered(job.jobId, 'inapp')
+    return ack(job)
+  } catch (error) {
+    if (isTransient(error) && job.attemptCount < MAX_RETRIES) {
+      await scheduleRetry(job)
+    } else {
+      await sendToDeadLetterQueue(job, error)
+    }
+    return nack(job)
+  }
+}
+
+// Retry coordinator
+async function scheduleRetry(job) {
+  job.attemptCount += 1
+  job.nextRetryAt = computeBackoff(job.attemptCount)
+  await persistRetryMetadata(job)
+  await enqueueDelayed(job.queueName, job, job.nextRetryAt)
+}
+```
+
+### 5.9 Architecture diagram
+
+```mermaid
+flowchart LR
+  HR[HR Console] -->|Notify All| API[Notification API]
+  API -->|Persist Notification| DB[(Notification DB)]
+  API -->|Enqueue Jobs| QueueBroker[(Queue Broker)]
+
+  subgraph Delivery Pipeline
+    QueueBroker --> EmailWorker[Email Worker Service]
+    QueueBroker --> InAppWorker[In-App Worker Service]
+    QueueBroker --> RetryWorker[Retry/Dead-Letter Service]
+  end
+
+  EmailWorker -->|Email status| DB
+  InAppWorker -->|User notification| DB
+  InAppWorker -->|Realtime event| WebSocket[WebSocket / Push Gateway]
+  RetryWorker -->|Failed jobs| DLQ[(Dead Letter Queue)]
+
+  WebSocket -->|push| StudentClient[Student App]
+```
+
+### 5.10 Reliability and scalability summary
+- Use durable queues to absorb the 50,000-recipient burst.
+- Separate delivery responsibilities into worker services.
+- Persist state before delivery so retries and audits are possible.
+- Implement idempotency and dead-letter handling to avoid duplicates and silent failure.
+- Scale workers independently for email and in-app channels.
+- Use retry policies with exponential backoff for transient failures.
+
 ## Next Steps
 
 1. Implement logging middleware interfaces

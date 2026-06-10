@@ -1,11 +1,14 @@
 import { Log } from "@notification/logging-middleware";
 import { Notification, NotificationType } from "../types/domain";
 import { NotificationRepository } from "../repositories/interfaces/notification-repository.interface";
+import { NotificationQueueService } from "../queues/notification-queue";
 import {
+  NotificationCreateInput,
   NotificationFetchResult,
   NotificationListQuery,
   NotificationListResponse,
   NotificationService,
+  NotificationUpdateInput,
 } from "./interfaces/notification-service.interface";
 
 const DEFAULT_PAGE = 1;
@@ -13,7 +16,27 @@ const DEFAULT_PAGE_SIZE = 20;
 const VALID_TYPES: NotificationType[] = ["event", "result", "placement"];
 
 export class NotificationServiceImpl implements NotificationService {
-  constructor(private readonly repository: NotificationRepository) {}
+  constructor(
+    private readonly repository: NotificationRepository,
+    private readonly queueService: NotificationQueueService,
+  ) {}
+
+  async createNotification(input: NotificationCreateInput): Promise<Notification> {
+    await Log("backend", "info", "service", "NotificationService.createNotification called");
+
+    const notification = await this.repository.create(input);
+    const scheduledNotification: Notification = {
+      ...notification,
+      status: input.scheduledAt ? "scheduled" : "sending",
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.repository.save(scheduledNotification);
+    await this.queueService.enqueueDeliveryJobs(scheduledNotification);
+
+    await Log("backend", "info", "service", `Notification queued for delivery id=${notification.id}`);
+    return scheduledNotification;
+  }
 
   async getNotification(id: string): Promise<NotificationFetchResult> {
     await Log("backend", "info", "service", `NotificationService.getNotification called for id=${id}`);
@@ -64,12 +87,35 @@ export class NotificationServiceImpl implements NotificationService {
         page,
         pageSize,
         total: result.total,
+        totalPages: Math.ceil(result.total / pageSize),
+        hasNext: page * pageSize < result.total,
+        hasPrev: page > 1,
       };
     } catch (error) {
       const message = this.buildErrorMessage("listNotifications", error);
       await Log("backend", "error", "service", message);
-      return { items: [], page, pageSize, total: 0, error: message };
+      return {
+        items: [],
+        page,
+        pageSize,
+        total: 0,
+        totalPages: 0,
+        hasNext: false,
+        hasPrev: false,
+        error: message,
+      };
     }
+  }
+
+  async updateNotification(id: string, input: NotificationUpdateInput): Promise<Notification> {
+    const notification = await this.repository.update(id, input);
+    await Log("backend", "info", "service", `Notification updated id=${id}`);
+    return notification;
+  }
+
+  async deleteNotification(id: string): Promise<void> {
+    await this.repository.remove(id);
+    await Log("backend", "info", "service", `Notification deleted id=${id}`);
   }
 
   private buildErrorMessage(method: string, error: unknown): string {

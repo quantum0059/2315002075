@@ -63,6 +63,26 @@ CREATE INDEX IF NOT EXISTS idx_user_notifications_read ON user_notifications(use
 CREATE INDEX IF NOT EXISTS idx_user_notifications_created ON user_notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_notifications_unread ON user_notifications(user_id, read, created_at DESC) WHERE read = FALSE;
 
+-- Durable queue table for notification delivery jobs
+CREATE TABLE IF NOT EXISTS notification_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_key TEXT NOT NULL UNIQUE,
+  notification_id UUID NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL,
+  channel TEXT NOT NULL CHECK (channel IN ('email', 'in-app')),
+  payload JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'retrying', 'completed', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  next_run_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_jobs_next_run ON notification_jobs(status, next_run_at);
+CREATE INDEX IF NOT EXISTS idx_notification_jobs_notification_id ON notification_jobs(notification_id);
+CREATE INDEX IF NOT EXISTS idx_notification_jobs_user_id ON notification_jobs(user_id);
+
 -- Indexes for user_preferences table
 CREATE INDEX IF NOT EXISTS idx_user_preferences_user_id ON user_preferences(user_id);
 
@@ -78,6 +98,11 @@ $$ LANGUAGE plpgsql;
 -- Triggers for updated_at
 CREATE TRIGGER update_notifications_updated_at
   BEFORE UPDATE ON notifications
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_notification_jobs_updated_at
+  BEFORE UPDATE ON notification_jobs
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
 
