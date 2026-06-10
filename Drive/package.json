@@ -1,0 +1,26 @@
+{
+  "name": "notification-system-evaluation",
+  "version": "1.0.0",
+  "description": "Notification System Evaluation - TypeScript Monorepo",
+  "private": true,
+  "workspaces": [
+    "logging_middleware",
+    "notification_app_be",
+    "notification_app_fe"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=notification_app_be\" \"npm run dev --workspace=notification_app_fe\"",
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\""
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^6.17.0",
+    "@typescript-eslint/parser": "^6.17.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.56.0",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3"
+  }
+}
