@@ -696,6 +696,145 @@ graph LR
     clientTime: string
   }
 }
+
+## Stage 3: Query Performance and Indexing
+
+### 3.1 Why the query is slow
+The query:
+```sql
+SELECT *
+FROM notifications
+WHERE studentID = 1042
+  AND isRead = false
+ORDER BY createdAt ASC;
+```
+is slow because it is filtering on a large table of 5,000,000 notifications and then sorting the result. If the database cannot use an index that supports both the filters and the ordering, it must scan a large portion of the table and perform an expensive sort operation.
+
+Key reasons:
+- `studentID` is a selective predicate, but unless indexed it requires scanning all rows.
+- `isRead` is low-cardinality (`true`/`false`), so an index on it alone is not selective enough to help much.
+- `ORDER BY createdAt ASC` forces additional sorting unless the chosen index already provides rows in the requested order.
+- With 50,000 students and 5,000,000 notifications, a full table scan is especially costly.
+
+### 3.2 Computational cost
+Without a useful index, the database costs are roughly:
+- Full table scan over 5,000,000 rows: O(N)
+- Filter each row on `studentID` and `isRead`: O(N)
+- Sort matching rows by `createdAt`: O(M log M), where M = number of unread notifications for that student.
+
+If the table has no index for the filter, the worst-case cost is:
+- `O(5,000,000) + O(M log M)`
+
+For an individual student, even if unread messages are only a few hundred, the database may still examine millions of rows first. That is why the query feels slow in an interactive notification system.
+
+### 3.3 Recommended indexes
+The best index for this query is a composite index that matches the filter and ordering:
+- `(studentID, isRead, createdAt)`
+
+This index supports:
+- fast lookup by `studentID`
+- filtering by `isRead`
+- returning rows already ordered by `createdAt`
+
+For PostgreSQL, a good index is:
+```sql
+CREATE INDEX idx_notifications_student_read_created
+ON notifications (studentID, isRead, createdAt);
+```
+
+If your workload frequently fetches only unread notifications and `isRead = false` is the most common filter, a partial index is even stronger:
+```sql
+CREATE INDEX idx_notifications_student_unread_created
+ON notifications (studentID, createdAt)
+WHERE isRead = false;
+```
+
+For placement-specific queries, a second index helps:
+```sql
+CREATE INDEX idx_notifications_placement_created
+ON notifications (type, createdAt)
+WHERE type = 'placement';
+```
+
+### 3.4 Why indexing every column is wrong
+Indexing every column is a common anti-pattern because:
+- each index consumes disk space and memory
+- each insert, update, or delete must maintain additional indexes, increasing write latency
+- many indexes are never used by actual query patterns
+- low-cardinality columns like `isRead` or `type` are poor index candidates by themselves
+
+A good indexing strategy is driven by actual access patterns, not by indexing everything. For this table, the meaningful indexes are those that support the most frequent queries: unread notification retrieval, ordered history lookups, and recent placement notification scans.
+
+### 3.5 Finding students receiving Placement notifications in the last 7 days
+To find students who have received placement notifications in the past week, use a query that filters by `type` and `createdAt`:
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE type = 'placement'
+  AND createdAt >= NOW() - INTERVAL '7 days'
+ORDER BY studentID;
+```
+
+If you also need counts per student:
+```sql
+SELECT studentID,
+       COUNT(*) AS placement_count
+FROM notifications
+WHERE type = 'placement'
+  AND createdAt >= NOW() - INTERVAL '7 days'
+GROUP BY studentID
+ORDER BY placement_count DESC;
+```
+
+### 3.6 Optimized SQL
+Optimized query for unread notifications by student:
+```sql
+SELECT *
+FROM notifications
+WHERE studentID = 1042
+  AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+This becomes efficient when backed by the composite index:
+```sql
+CREATE INDEX idx_notifications_student_read_created
+ON notifications (studentID, isRead, createdAt);
+```
+
+Optimized query for placement notifications in the last 7 days:
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE type = 'placement'
+  AND createdAt >= NOW() - INTERVAL '7 days'
+ORDER BY studentID;
+```
+
+If the query needs the full notification rows, use:
+```sql
+SELECT *
+FROM notifications
+WHERE type = 'placement'
+  AND createdAt >= NOW() - INTERVAL '7 days'
+ORDER BY createdAt ASC;
+```
+
+### 3.7 Tradeoffs
+Every index improves read performance at the cost of write performance and storage.
+
+Tradeoffs to consider:
+- Composite index `(studentID, isRead, createdAt)` is ideal for the unread query, but it increases INSERT/UPDATE cost.
+- Partial indexes are powerful when the filtered subset is small, but they only help those specific predicates.
+- Indexing `type` alone is weak; combining it with `createdAt` is much better for recent notification scans.
+- Avoid indexing rarely queried fields or low-cardinality fields by themselves, because the cost outweighs the benefit.
+
+In practice, the recommended approach is:
+- prioritize indexes for the highest-frequency queries
+- monitor query plans and actual execution times
+- avoid “index every column” because that strategy shifts cost from reads to writes and storage without improving real performance
+
+By narrowing the index set to the actual query patterns above, the notification system can support fast unread retrieval for student inboxes and efficient placement notification reporting even at 5 million rows.
 ```
 
 #### Real-Time Delivery Flow
